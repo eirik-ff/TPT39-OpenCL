@@ -8,12 +8,14 @@ FLAGS=-g -Wno-deprecated-declarations -Wall -DARCH_ARM -Wextra -Wno-unused-param
 #LDFLAGS=../../build/utils/Utils.o -L../../build/ -L..  -larm_compute -larm_compute_core -lOpenCL
 LDFLAGS=-L${OCLLIBSDIR} -larm_compute -larm_compute_core -lOpenCL
 
+EXTRA_FLAGS=-Wno-error=unused-variable
+
 all: ${EXE}
 ${EXE}.o:${SRCS}
-	$(GCC) -c ${FLAGS} ${SRCS} -o ${EXE}.o
+	$(GCC) -c ${FLAGS} ${SRCS} -o ${EXE}.o ${EXTRA_FLAGS}
 
 ${EXE}:${EXE}.o
-	${GCC} -o ${EXE} ${EXE}.o  ${LDFLAGS}
+	${GCC} -o ${EXE} ${EXE}.o  ${LDFLAGS} ${EXTRA_FLAGS}
 
 run:${EXE}
 	./${EXE}
