@@ -7,6 +7,8 @@
 #define STRING_BUFFER_LEN 1024
 using namespace std;
 
+int g_counter;
+
 const char *opencl =
      "__kernel void hello()\n"
      "{\n"
@@ -58,6 +60,8 @@ void callback(const char *buffer, size_t length, size_t final, void *user_data)
 
 int main()
 {
+	g_counter = 0;
+
      char char_buffer[STRING_BUFFER_LEN];
      cl_platform_id platform;
      cl_device_id device;
@@ -87,7 +91,7 @@ int main()
      queue = clCreateCommandQueue(context, device, 0, NULL);
      unsigned char **opencl_program=read_file("hello_world.cl");
      program = clCreateProgramWithSource(context, 1, (const char **)opencl_program, NULL, NULL);
-     //program = clCreateProgramWithSource(context, 1, &opencl, NULL, NULL);
+     // program = clCreateProgramWithSource(context, 1, &opencl, NULL, NULL);
      if (program == NULL)
 	{
          printf("Program creation failed\n");
