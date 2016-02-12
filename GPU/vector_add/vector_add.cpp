@@ -289,11 +289,8 @@ int main()
         }
     }
 
-    if (N < 10) {
-        for (unsigned long j = 0; j < N; j++) {
-            printf("Output: %f    Referenccce: %f\n", output[j], ref_output[j]);
-        }
-    }
+    if (pass)
+        printf("Output and reference are equal\n");
 
     // Release local events.
     clReleaseEvent(write_event[0]);
