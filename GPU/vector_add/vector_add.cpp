@@ -9,6 +9,7 @@
 #include <chrono>
 
 #define STRING_BUFFER_LEN 1024
+#define USE_MAP_BUFFER 0
 
 using namespace std;
 
@@ -89,7 +90,36 @@ int main()
     cl_kernel kernel;
 
     //--------------------------------------------------------------------
-    const unsigned long N = 500000;
+    const unsigned long N = 50000000;
+    int status;
+
+    // initialize OpenCl 
+    clGetPlatformIDs(1, &platform, NULL);
+    clGetPlatformInfo(platform, CL_PLATFORM_NAME, STRING_BUFFER_LEN, char_buffer, NULL);
+    printf("%-40s = %s\n", "CL_PLATFORM_NAME", char_buffer);
+    clGetPlatformInfo(platform, CL_PLATFORM_VENDOR, STRING_BUFFER_LEN, char_buffer, NULL);
+    printf("%-40s = %s\n", "CL_PLATFORM_VENDOR ", char_buffer);
+    clGetPlatformInfo(platform, CL_PLATFORM_VERSION, STRING_BUFFER_LEN, char_buffer, NULL);
+    printf("%-40s = %s\n\n", "CL_PLATFORM_VERSION ", char_buffer);
+
+    context_properties[1] = (cl_context_properties)platform;
+    clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    context = clCreateContext(context_properties, 1, &device, NULL, NULL, NULL);
+    queue = clCreateCommandQueue(context, device, 0, NULL);
+
+    // build kernel
+    unsigned char **opencl_program = read_file("vector_add.cl");
+    program = clCreateProgramWithSource(context, 1, (const char **)opencl_program, NULL, NULL);
+    if (program == NULL)
+    {
+        printf("Program creation failed\n");
+        return 1;
+    }	
+    int success = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    if(success != CL_SUCCESS) print_clbuild_errors(program,device);
+    kernel = clCreateKernel(program, "vector_add", NULL);
+
+
     float *input_a = (float *)malloc(sizeof(float)*N);
     float *input_b = (float *)malloc(sizeof(float)*N);
     float *output = (float *)malloc(sizeof(float)*N);
@@ -97,9 +127,6 @@ int main()
     cl_mem input_a_buf; // num_devices elements
     cl_mem input_b_buf; // num_devices elements
     cl_mem output_buf; // num_devices elements
-    int status;
-
-    cout << "Allocated buffers done" << endl;
 
     // create buffers
     auto start = chrono::high_resolution_clock::now();
@@ -122,60 +149,75 @@ int main()
     cout << "CPU took " << diff.count() / 1000.0 << " ms to run." << endl;
 
     // run on GPU
-    clGetPlatformIDs(1, &platform, NULL);
-    clGetPlatformInfo(platform, CL_PLATFORM_NAME, STRING_BUFFER_LEN, char_buffer, NULL);
-    printf("%-40s = %s\n", "CL_PLATFORM_NAME", char_buffer);
-    clGetPlatformInfo(platform, CL_PLATFORM_VENDOR, STRING_BUFFER_LEN, char_buffer, NULL);
-    printf("%-40s = %s\n", "CL_PLATFORM_VENDOR ", char_buffer);
-    clGetPlatformInfo(platform, CL_PLATFORM_VERSION, STRING_BUFFER_LEN, char_buffer, NULL);
-    printf("%-40s = %s\n\n", "CL_PLATFORM_VERSION ", char_buffer);
 
-    context_properties[1] = (cl_context_properties)platform;
-    clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
-    context = clCreateContext(context_properties, 1, &device, NULL, NULL, NULL);
-    queue = clCreateCommandQueue(context, device, 0, NULL);
+#if USE_MAP_BUFFER
+    // Input buffers.
+    input_a_buf = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR,
+            N * sizeof(float), (void *)input_a, &status);
+    checkError(status, "Failed to create buffer for input A");
 
-    unsigned char **opencl_program = read_file("vector_add.cl");
-    program = clCreateProgramWithSource(context, 1, (const char **)opencl_program, NULL, NULL);
-    if (program == NULL)
-    {
-        printf("Program creation failed\n");
-        return 1;
-    }	
-    int success = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
-    if(success != CL_SUCCESS) print_clbuild_errors(program,device);
-    kernel = clCreateKernel(program, "vector_add", NULL);
+    input_b_buf = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR,
+            N * sizeof(float), (void *)input_b, &status);
+    checkError(status, "Failed to create buffer for input B");
 
+    // Output buffer.
+    output_buf = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR,
+            N * sizeof(float), (void *)output, &status);
+    checkError(status, "Failed to create buffer for output");
+#else
     // Input buffers.
     input_a_buf = clCreateBuffer(context, CL_MEM_READ_ONLY,
-            N* sizeof(float), NULL, &status);
+            N * sizeof(float), NULL, &status);
     checkError(status, "Failed to create buffer for input A");
 
     input_b_buf = clCreateBuffer(context, CL_MEM_READ_ONLY,
-            N* sizeof(float), NULL, &status);
+            N * sizeof(float), NULL, &status);
     checkError(status, "Failed to create buffer for input B");
 
     // Output buffer.
     output_buf = clCreateBuffer(context, CL_MEM_WRITE_ONLY,
-            N* sizeof(float), NULL, &status);
+            N * sizeof(float), NULL, &status);
     checkError(status, "Failed to create buffer for output");
+#endif // USE_MAP_BUFFER
 
 
+#if USE_MAP_BUFFER
+    // memory map buffers instead of copying them
+    cl_event write_event[2];
+
+    void *input_a_buf_ptr = clEnqueueMapBuffer(queue, input_a_buf, CL_TRUE, 
+        CL_MAP_READ, 0, N * sizeof(float), 0, NULL, &write_event[0], &status);
+    checkError(status, "Failed to map input buffer a.");
+
+    void *input_b_buf_ptr = clEnqueueMapBuffer(queue, input_b_buf, CL_TRUE, 
+        CL_MAP_READ, 0, N * sizeof(float), 0, NULL, &write_event[1], &status);
+    checkError(status, "Failed to map input buffer b.");
+
+    void *output_buf_ptr = clEnqueueMapBuffer(queue, output_buf, CL_TRUE,
+        CL_MAP_WRITE, 0, N * sizeof(float), 0, NULL, NULL, &status);
+    checkError(status, "Failed to map output buffer.");
+#else
+    start = chrono::high_resolution_clock::now();
 
     // Transfer inputs to each device. Each of the host buffers supplied to
     // clEnqueueWriteBuffer here is already aligned to ensure that DMA is used
     // for the host-to-device transfer.
     cl_event write_event[2];
-    cl_event kernel_event, finish_event;
-    status = clEnqueueWriteBuffer(queue, input_a_buf, CL_FALSE,
+    status = clEnqueueWriteBuffer(queue, input_a_buf, CL_TRUE,
             0, N* sizeof(float), input_a, 0, NULL, &write_event[0]);
     checkError(status, "Failed to transfer input A");
 
-    status = clEnqueueWriteBuffer(queue, input_b_buf, CL_FALSE,
+    status = clEnqueueWriteBuffer(queue, input_b_buf, CL_TRUE,
             0, N* sizeof(float), input_b, 0, NULL, &write_event[1]);
     checkError(status, "Failed to transfer input B");
 
+    end = chrono::high_resolution_clock::now();
+    diff = chrono::duration_cast<chrono::microseconds>(end - start);
+    cout << "Copying buffers from CPU to GPU took " << diff.count() / 1000.0f << " ms." << endl;
+#endif /* USE_MAP_BUFFER */
+
     // Set kernel arguments.
+    cl_event kernel_event, finish_event;
     unsigned argi = 0;
 
     status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &input_a_buf);
@@ -200,6 +242,20 @@ int main()
     end = chrono::high_resolution_clock::now();
     diff = chrono::duration_cast<chrono::microseconds>(end - start);
     cout << "GPU took " << diff.count() / 1000.0 << " ms to run. (no read buffer)" << endl;
+
+
+    start = chrono::high_resolution_clock::now();
+    cl_event kernel_event2;
+    status = clEnqueueNDRangeKernel(queue, kernel, 1, NULL,
+            &global_work_size, NULL, 2, write_event, &kernel_event2);
+    checkError(status, "Failed to launch kernel");
+
+    status = clWaitForEvents(1, &kernel_event2);
+    checkError(status, "Failed wait");
+
+    end = chrono::high_resolution_clock::now();
+    diff = chrono::duration_cast<chrono::microseconds>(end - start);
+    cout << "GPU2 took " << diff.count() / 1000.0 << " ms to run. (no read buffer)" << endl;
 
     // Read the result. This the final operation.
     start = chrono::high_resolution_clock::now();
