@@ -15,6 +15,9 @@ ${EXE}.o:${SRCS}
 ${EXE}:${EXE}.o
 	${GCC} -o ${EXE} ${EXE}.o  ${LDFLAGS}
 
+run:${EXE}
+	./${EXE}
+
 debug:${EXE}
 	LD_PRELOAD=${MGD}/libinterceptor.so ./${EXE}
 

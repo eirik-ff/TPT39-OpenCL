@@ -6,6 +6,8 @@
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 
+#include <chrono>
+
 #define STRING_BUFFER_LEN 1024
 
 using namespace std;
@@ -87,7 +89,7 @@ int main()
     cl_kernel kernel;
 
     //--------------------------------------------------------------------
-    const unsigned N = 50000000;
+    const unsigned long N = 500000;
     float *input_a = (float *)malloc(sizeof(float)*N);
     float *input_b = (float *)malloc(sizeof(float)*N);
     float *output = (float *)malloc(sizeof(float)*N);
@@ -97,25 +99,29 @@ int main()
     cl_mem output_buf; // num_devices elements
     int status;
 
-    time_t start,end;
-    double diff;
-    for(unsigned j = 0; j < N; ++j) {
+    cout << "Allocated buffers done" << endl;
+
+    // create buffers
+    auto start = chrono::high_resolution_clock::now();
+    for(unsigned long j = 0; j < N; ++j) {
         input_a[j] = rand_float();
         input_b[j] = rand_float();
-        // ref_output[j] = input_a[j] + input_b[j];
         //printf("ref %f\n",ref_output[j]);
     }
+    auto end = chrono::high_resolution_clock::now();
+    auto diff = chrono::duration_cast<chrono::microseconds>(end - start);
+    cout << "It took " << diff.count() / 1000.0 << " ms to fill the buffers with random values." << endl;
 
     // time referene output on CPU
-    time (&start);
-    for (int i = 0; i < N; i++) {
-        ref_output[i] = input_a[j] + input_b[j];
+    start = chrono::high_resolution_clock::now();
+    for(unsigned long j = 0; j < N; j++) {
+        ref_output[j] = input_a[j] + input_b[j];
     }
-    time (&end);
-    diff = difftime(end, start);
-    printf ("CPU took %.2lf seconds to run.\n", diff );
+    end = chrono::high_resolution_clock::now();
+    diff = chrono::duration_cast<chrono::microseconds>(end - start);
+    cout << "CPU took " << diff.count() / 1000.0 << " ms to run." << endl;
 
-    time (&start);
+    // run on GPU
     clGetPlatformIDs(1, &platform, NULL);
     clGetPlatformInfo(platform, CL_PLATFORM_NAME, STRING_BUFFER_LEN, char_buffer, NULL);
     printf("%-40s = %s\n", "CL_PLATFORM_NAME", char_buffer);
@@ -160,7 +166,7 @@ int main()
     // clEnqueueWriteBuffer here is already aligned to ensure that DMA is used
     // for the host-to-device transfer.
     cl_event write_event[2];
-    cl_event kernel_event,finish_event;
+    cl_event kernel_event, finish_event;
     status = clEnqueueWriteBuffer(queue, input_a_buf, CL_FALSE,
             0, N* sizeof(float), input_a, 0, NULL, &write_event[0]);
     checkError(status, "Failed to transfer input A");
@@ -182,23 +188,34 @@ int main()
     checkError(status, "Failed to set argument 3");
 
     const size_t global_work_size = N;
+    start = chrono::high_resolution_clock::now();
+
     status = clEnqueueNDRangeKernel(queue, kernel, 1, NULL,
             &global_work_size, NULL, 2, write_event, &kernel_event);
     checkError(status, "Failed to launch kernel");
 
+    status = clWaitForEvents(1, &kernel_event);
+    checkError(status, "Failed wait");
+
+    end = chrono::high_resolution_clock::now();
+    diff = chrono::duration_cast<chrono::microseconds>(end - start);
+    cout << "GPU took " << diff.count() / 1000.0 << " ms to run. (no read buffer)" << endl;
+
     // Read the result. This the final operation.
+    start = chrono::high_resolution_clock::now();
+
     status = clEnqueueReadBuffer(queue, output_buf, CL_TRUE,
             0, N* sizeof(float), output, 1, &kernel_event, &finish_event);
 
-    time (&end);
-    diff = difftime (end,start);
-    printf ("GPU took %.8lf seconds to run.\n", diff );
+    end = chrono::high_resolution_clock::now();
+    diff = chrono::duration_cast<chrono::microseconds>(end - start);
+    cout << "It took " << diff.count() / 1000.0 << " ms to read buffer." << endl;
 
     // Verify results.
     bool pass = true;
-    for(unsigned j = 0; j < N && pass; ++j) {
+    for(unsigned long j = 0; j < N && pass; ++j) {
         if(fabsf(output[j] - ref_output[j]) > 1.0e-5f) {
-            printf("Failed verification @ index %d\nOutput: %f\nReference: %f\n",
+            printf("Failed verification @ index %ld\nOutput: %f\nReference: %f\n",
                     j, output[j], ref_output[j]);
             pass = false;
         }
