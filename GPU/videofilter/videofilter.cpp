@@ -15,6 +15,13 @@ using namespace std;
 #define STRING_BUFFER_LEN 1024
 
 
+/* docs and notes
+
+OpenCV Mat object is stored in row-major order, see https://docs.opencv.org/2.4/modules/core/doc/basic_structures.html#mat
+
+*/
+
+
 int main(int argc, char** argv)
 {
     // setup opencl
@@ -31,7 +38,7 @@ int main(int argc, char** argv)
     };
     cl_command_queue queue;
     cl_program program;
-    cl_kernel kernel;
+    cl_kernel convolve_kernel, threshold_kernel, average_kernel;
     int status;
 
     // initialize OpenCl 
@@ -48,18 +55,20 @@ int main(int argc, char** argv)
     context = clCreateContext(context_properties, 1, &device, NULL, NULL, NULL);
     queue = clCreateCommandQueue(context, device, 0, NULL);
 
-    // build kernel
-    unsigned char **opencl_program = read_file("convolve.cl");
-    program = clCreateProgramWithSource(context, 1, (const char **)opencl_program, NULL, NULL);
+    // build kernels
+    unsigned char **source;
+    
+    source = read_file("convolve.cl");
+    program = clCreateProgramWithSource(context, 1, (const char **)source, NULL, NULL);
     if (program == NULL)
     {
         printf("Program creation failed\n");
-        return 1;
+        return EXIT_FAILURE;
     }	
     int success = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
     if(success != CL_SUCCESS) print_clbuild_errors(program,device);
-    kernel = clCreateKernel(program, "convolve", NULL);
-    printf("Kernel build successful\n");
+    convolve_kernel = clCreateKernel(program, "convolve", NULL);
+
 
     // load video
     VideoCapture camera("./bourne.mp4");
@@ -92,9 +101,38 @@ int main(int argc, char** argv)
     waitKey(1);
 #endif
 
-    // make buffer for each frame
-    cl_mem frame_buf_cl = clCreateBuffer(context, CL_MEM_READ_WRITE, size.width * size.height * sizeof(unsigned char), NULL, &status);
-    checkError(status, "Failed to allocate frame buffer");
+    size_t frame_size_bytes = size.width * size.height * sizeof(unsigned char);
+
+
+    cl_mem grayframe_cl, edge_x_cl, edge_y_cl, edge_cl;
+
+    grayframe_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, frame_size_bytes, NULL, &status);
+    checkError(status, "Failed to allocate grayframe buffer");
+
+    edge_x_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, frame_size_bytes, NULL, &status);
+    checkError(status, "Failed to allocate edge_x buffer");
+
+    edge_y_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, frame_size_bytes, NULL, &status);
+    checkError(status, "Failed to allocate edge_y buffer");
+
+    edge_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, frame_size_bytes, NULL, &status);
+    checkError(status, "Failed to allocate edge buffer");
+
+
+    unsigned char *grayframe_ptr, *edge_x_ptr, *edge_y_ptr, *edge_ptr;
+
+    grayframe_ptr = (unsigned char *)clEnqueueMapBuffer(queue, grayframe_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
+    checkError(status, "Failed to map grayframe buffer to pointer");
+
+    edge_x_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_x_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
+    checkError(status, "Failed to map edge_x buffer to pointer");
+
+    edge_y_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_y_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
+    checkError(status, "Failed to map edge_y buffer to pointer");
+
+    edge_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
+    checkError(status, "Failed to map edge buffer to pointer");
+
 
     int max_frames = 299;
     while (true) {
@@ -103,8 +141,13 @@ int main(int argc, char** argv)
         Mat cameraFrame;
         camera >> cameraFrame;
 
-        Mat grayframe, edge_x, edge_y, edge;
+        Mat grayframe(size, CV_8U, grayframe_ptr);
+        Mat edge_x(size, CV_8U, edge_x_ptr);
+        Mat edge_y(size, CV_8U, edge_y_ptr);
+        Mat edge(size, CV_8U, edge_ptr);
+
         cvtColor(cameraFrame, grayframe, CV_BGR2GRAY);
+
 
         // do video filter on CPU using OpenCV
         start = chrono::high_resolution_clock::now();
@@ -121,9 +164,8 @@ int main(int argc, char** argv)
 
         end = chrono::high_resolution_clock::now();
 
-        // Clear the output image to black, so that the cartoon line drawings will be black (ie: not drawn).
-        Mat displayframe;
-        grayframe.copyTo(displayframe, edge);  // copy with edge as mask
+        Mat displayframe(size, CV_8U, grayframe_ptr);
+        bitwise_and(displayframe, edge, displayframe);  // this also does masking
         outputVideo << displayframe;
 
 #ifdef SHOW
