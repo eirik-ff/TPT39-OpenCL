@@ -24,6 +24,10 @@ OpenCV Mat object is stored in row-major order, see https://docs.opencv.org/2.4/
 
 int main(int argc, char** argv)
 {
+    // defined as variables to be able to send them to kernels
+    const int THRESH_VAL = 80;
+    const int THRESH_MAXVAL = 255;
+
     // setup opencl
     char char_buffer[STRING_BUFFER_LEN];
     cl_platform_id platform;
@@ -39,7 +43,7 @@ int main(int argc, char** argv)
     cl_command_queue queue;
     cl_program program;
     cl_kernel convolve_kernel, threshold_kernel, average_kernel;
-    int status;
+    int status, success;
 
     // initialize OpenCl 
     clGetPlatformIDs(1, &platform, NULL);
@@ -58,6 +62,7 @@ int main(int argc, char** argv)
     // build kernels
     unsigned char **source;
     
+    // convolve kernel
     source = read_file("convolve.cl");
     program = clCreateProgramWithSource(context, 1, (const char **)source, NULL, NULL);
     if (program == NULL)
@@ -65,9 +70,27 @@ int main(int argc, char** argv)
         printf("Program creation failed\n");
         return EXIT_FAILURE;
     }	
-    int success = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    success = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
     if(success != CL_SUCCESS) print_clbuild_errors(program,device);
     convolve_kernel = clCreateKernel(program, "convolve", NULL);
+
+    // threshold kernel
+    source = read_file("threshold.cl");
+    program = clCreateProgramWithSource(context, 1, (const char **)source, NULL, NULL);
+    if (program == NULL)
+    {
+        printf("Program creation failed\n");
+        return EXIT_FAILURE;
+    }	
+    success = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    if(success != CL_SUCCESS) print_clbuild_errors(program,device);
+    threshold_kernel = clCreateKernel(program, "threshold", NULL);
+
+    // set static threshold args
+    status = clSetKernelArg(threshold_kernel, 1, sizeof(int), &THRESH_VAL);
+    checkError(status, "Failed to set thresh param in threshold kernel");
+    status = clSetKernelArg(threshold_kernel, 2, sizeof(int), &THRESH_MAXVAL);
+    checkError(status, "Failed to set maxval param in threshold kernel");
 
 
     // load video
@@ -101,7 +124,8 @@ int main(int argc, char** argv)
     waitKey(1);
 #endif
 
-    size_t frame_size_bytes = size.width * size.height * sizeof(unsigned char);
+    size_t frame_size_px = size.width * size.height;
+    size_t frame_size_bytes = frame_size_px * sizeof(unsigned char);
 
 
     cl_mem grayframe_cl, edge_x_cl, edge_y_cl, edge_cl;
@@ -119,6 +143,11 @@ int main(int argc, char** argv)
     checkError(status, "Failed to allocate edge buffer");
 
 
+    status = clSetKernelArg(threshold_kernel, 0, sizeof(cl_mem), &edge_cl);
+    checkError(status, "Failed to set img param in threshold kernel");
+
+
+
     unsigned char *grayframe_ptr, *edge_x_ptr, *edge_y_ptr, *edge_ptr;
 
     grayframe_ptr = (unsigned char *)clEnqueueMapBuffer(queue, grayframe_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
@@ -133,6 +162,11 @@ int main(int argc, char** argv)
     edge_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
     checkError(status, "Failed to map edge buffer to pointer");
 
+    Mat grayframe(size, CV_8U, grayframe_ptr);
+    Mat edge_x(size, CV_8U, edge_x_ptr);
+    Mat edge_y(size, CV_8U, edge_y_ptr);
+    Mat edge(size, CV_8U, edge_ptr);
+
 
     int max_frames = 299;
     while (true) {
@@ -140,14 +174,7 @@ int main(int argc, char** argv)
 
         Mat cameraFrame;
         camera >> cameraFrame;
-
-        Mat grayframe(size, CV_8U, grayframe_ptr);
-        Mat edge_x(size, CV_8U, edge_x_ptr);
-        Mat edge_y(size, CV_8U, edge_y_ptr);
-        Mat edge(size, CV_8U, edge_ptr);
-
         cvtColor(cameraFrame, grayframe, CV_BGR2GRAY);
-
 
         // do video filter on CPU using OpenCV
         start = chrono::high_resolution_clock::now();
@@ -159,8 +186,28 @@ int main(int argc, char** argv)
         Scharr(grayframe, edge_x, CV_8U, 0, 1, 1, 0, BORDER_DEFAULT);
         Scharr(grayframe, edge_y, CV_8U, 1, 0, 1, 0, BORDER_DEFAULT);
 
-        addWeighted( edge_x, 0.5, edge_y, 0.5, 0, edge );  // average between edge_x and edge_y, stored in edge
-        threshold(edge, edge, 80, 255, THRESH_BINARY_INV);  // threshold over 80, all data either 0 or 255
+        addWeighted( edge_x, 0.5, edge_y, 0.5, 0, edge);  // average between edge_x and edge_y, stored in edge
+
+
+#define CPU_THRESHOLD
+        auto thresh_start = chrono::high_resolution_clock::now();
+#ifdef CPU_THRESHOLD
+        threshold(edge, edge, THRESH_VAL, THRESH_MAXVAL, THRESH_BINARY_INV);  // threshold over 80, all data either 0 or 255
+#else
+        // launch threshold kernel
+        clEnqueueUnmapMemObject(queue, edge_cl, edge_ptr, 0, NULL, NULL);
+
+        cl_event threshold_event;
+        status = clEnqueueNDRangeKernel(queue, threshold_kernel, 1, NULL, &frame_size_px, NULL, 0, NULL, &threshold_event);
+        checkError(status, "Failed to launch threshold kernel");
+
+        status = clWaitForEvents(1, &threshold_event);
+        checkError(status, "Failed to wait for threshold event");
+
+        edge_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
+#endif  // CPU_THRESHOLD
+        auto thresh_end = chrono::high_resolution_clock::now();
+        cout << "thresholding: " << chrono::duration_cast<chrono::microseconds>(thresh_end - thresh_start).count() / 1000.0f << " ms" << endl;
 
         end = chrono::high_resolution_clock::now();
 
@@ -176,6 +223,7 @@ int main(int argc, char** argv)
         diff = chrono::duration_cast<chrono::milliseconds>(end - start);
         tot_ms += diff.count();
     }
+
     outputVideo.release();
     camera.release();
     printf("FPS %.2lf .\n", (1000.0f * max_frames)/tot_ms);
