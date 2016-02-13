@@ -280,11 +280,9 @@ int main()
 
     // fill buffer with random values
     auto start = chrono::high_resolution_clock::now();
-    for (int row = 0; row < N; row++) {
-        for (int col = 0; col < N; col++) {
-            set_matrix_elem(matA, rand_float(), row, col, N);
-            set_matrix_elem(matB, rand_float(), row, col, N);
-        }
+    for (int i = 0; i < N * N; i++) {
+        matA[i] = rand_float();
+        matB[i] = rand_float();
     }
     auto end = chrono::high_resolution_clock::now();
     auto diff = chrono::duration_cast<chrono::microseconds>(end - start);
