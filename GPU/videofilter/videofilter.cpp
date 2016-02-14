@@ -164,8 +164,6 @@ int main(int argc, char** argv)
     // set static convolution kernel args
     status = clSetKernelArg(convolve_kernel, 2, sizeof(int), &size.width);
     checkError(status, "Failed to set convolve kernel width arg");
-    status = clSetKernelArg(convolve_kernel, 3, sizeof(int), &size.height);
-    checkError(status, "Failed to set convolve kernel width arg");
 
 
     // set threshold kernel args
@@ -244,10 +242,8 @@ int main(int argc, char** argv)
         checkError(status, "Failed to set convolve kernel input img arg");
         status = clSetKernelArg(convolve_kernel, 1, sizeof(cl_mem), &grayframe_cl);
         checkError(status, "Failed to set convolve kernel output img arg");
-        status = clSetKernelArg(convolve_kernel, 4, sizeof(cl_mem), &gaussian_cl);
+        status = clSetKernelArg(convolve_kernel, 3, sizeof(cl_mem), &gaussian_cl);
         checkError(status, "Failed to set convolve kernel gaussian arg");
-        status = clSetKernelArg(convolve_kernel, 5, sizeof(int), &gaussian_kern_size);
-        checkError(status, "Failed to set convolve kernel gaussian kern size arg");
 
         // we're supposed to do the gaussian filter three times
         for (int i = 0; i < 3; i++) {
@@ -275,13 +271,11 @@ int main(int argc, char** argv)
 #if GPU_SOBEL
         status = clSetKernelArg(convolve_kernel, 0, sizeof(cl_mem), &grayframe_cl);
         checkError(status, "Failed to set convolve kernel input img arg");
-        status = clSetKernelArg(convolve_kernel, 5, sizeof(int), &sobel_kern_size);
-        checkError(status, "Failed to set convolve kernel sobel kern size arg");
 
         // sobel x
         status = clSetKernelArg(convolve_kernel, 1, sizeof(cl_mem), &edge_x_cl);
         checkError(status, "Failed to set convolve kernel sobel x output img arg");
-        status = clSetKernelArg(convolve_kernel, 4, sizeof(cl_mem), &sobel_x_cl);
+        status = clSetKernelArg(convolve_kernel, 3, sizeof(cl_mem), &sobel_x_cl);
         checkError(status, "Failed to set convolve kernel sobel x kernel buffer arg");
 
         cl_event sobel_x_event;
@@ -294,7 +288,7 @@ int main(int argc, char** argv)
         // sobel y
         status = clSetKernelArg(convolve_kernel, 1, sizeof(cl_mem), &edge_y_cl);
         checkError(status, "Failed to set convolve kernel sobel y output img arg");
-        status = clSetKernelArg(convolve_kernel, 4, sizeof(cl_mem), &sobel_y_cl);
+        status = clSetKernelArg(convolve_kernel, 3, sizeof(cl_mem), &sobel_y_cl);
         checkError(status, "Failed to set convolve kernel sobel y kernel buffer arg");
 
         cl_event sobel_y_event;
