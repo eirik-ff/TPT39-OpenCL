@@ -11,8 +11,13 @@
 using namespace cv;
 using namespace std;
 
-#define SHOW
 #define STRING_BUFFER_LEN 1024
+
+#define SHOW 1
+#define GPU_GAUSSIAN 0
+#define GPU_SOBEL 0
+#define GPU_AVERAGE 1
+#define GPU_THRESHOLD 1
 
 
 /* docs and notes
@@ -86,11 +91,18 @@ int main(int argc, char** argv)
     if(success != CL_SUCCESS) print_clbuild_errors(program,device);
     threshold_kernel = clCreateKernel(program, "threshold", NULL);
 
-    // set static threshold args
-    status = clSetKernelArg(threshold_kernel, 1, sizeof(int), &THRESH_VAL);
-    checkError(status, "Failed to set thresh param in threshold kernel");
-    status = clSetKernelArg(threshold_kernel, 2, sizeof(int), &THRESH_MAXVAL);
-    checkError(status, "Failed to set maxval param in threshold kernel");
+
+    // average kernel
+    source = read_file("average.cl");
+    program = clCreateProgramWithSource(context, 1, (const char **)source, NULL, NULL);
+    if (program == NULL)
+    {
+        printf("Program creation failed\n");
+        return EXIT_FAILURE;
+    }	
+    success = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    if(success != CL_SUCCESS) print_clbuild_errors(program,device);
+    average_kernel = clCreateKernel(program, "average", NULL);
 
 
     // load video
@@ -112,23 +124,21 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    auto start = chrono::high_resolution_clock::now();
-    auto end = chrono::high_resolution_clock::now();
-    auto diff = chrono::duration_cast<chrono::milliseconds>(end - start);
     int tot_ms = 0;
     int count = 0;
     const char *window_name = "filter";   // Name shown in the GUI window.
 
-#ifdef SHOW
+#if SHOW
     namedWindow(window_name); // Resizable window, might not work on Windows.
     waitKey(1);
 #endif
 
     size_t frame_size_px = size.width * size.height;
     size_t frame_size_bytes = frame_size_px * sizeof(unsigned char);
+    size_t gaussian_kern_size = 3;
+    size_t sobel_kern_size = 3;
 
-
-    cl_mem grayframe_cl, edge_x_cl, edge_y_cl, edge_cl;
+    cl_mem grayframe_cl, edge_x_cl, edge_y_cl, edge_cl, gaussian_cl, sobel_x_cl, sobel_y_cl;
 
     grayframe_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, frame_size_bytes, NULL, &status);
     checkError(status, "Failed to allocate grayframe buffer");
@@ -142,13 +152,37 @@ int main(int argc, char** argv)
     edge_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, frame_size_bytes, NULL, &status);
     checkError(status, "Failed to allocate edge buffer");
 
+    gaussian_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, gaussian_kern_size * gaussian_kern_size * sizeof(float), NULL, &status);
+    checkError(status, "Failed to allocate gaussian kernel buffer");
 
+    sobel_x_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, sobel_kern_size * sobel_kern_size * sizeof(float), NULL, &status);
+    checkError(status, "Failed to allocal sobel x kernel buffer");
+
+    sobel_y_cl = clCreateBuffer(context, CL_MEM_ALLOC_HOST_PTR, sobel_kern_size * sobel_kern_size * sizeof(float), NULL, &status);
+    checkError(status, "Failed to allocal sobel y kernel buffer");
+
+
+    // set threshold kernel args
     status = clSetKernelArg(threshold_kernel, 0, sizeof(cl_mem), &edge_cl);
     checkError(status, "Failed to set img param in threshold kernel");
+    status = clSetKernelArg(threshold_kernel, 1, sizeof(int), &THRESH_VAL);
+    checkError(status, "Failed to set thresh param in threshold kernel");
+    status = clSetKernelArg(threshold_kernel, 2, sizeof(int), &THRESH_MAXVAL);
+    checkError(status, "Failed to set maxval param in threshold kernel");
 
 
+    // set average kernel args
+    status = clSetKernelArg(average_kernel, 0, sizeof(cl_mem), &edge_x_cl);
+    checkError(status, "Failed to set in1 param in average kernel");
+    
+    status = clSetKernelArg(average_kernel, 1, sizeof(cl_mem), &edge_y_cl);
+    checkError(status, "Failed to set in2 param in average kernel");
 
-    unsigned char *grayframe_ptr, *edge_x_ptr, *edge_y_ptr, *edge_ptr;
+    status = clSetKernelArg(average_kernel, 2, sizeof(cl_mem), &edge_cl);
+    checkError(status, "Failed to set out param in average kernel");
+
+
+    unsigned char *grayframe_ptr = NULL, *edge_x_ptr = NULL, *edge_y_ptr = NULL, *edge_ptr = NULL;
 
     grayframe_ptr = (unsigned char *)clEnqueueMapBuffer(queue, grayframe_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
     checkError(status, "Failed to map grayframe buffer to pointer");
@@ -167,8 +201,29 @@ int main(int argc, char** argv)
     Mat edge_y(size, CV_8U, edge_y_ptr);
     Mat edge(size, CV_8U, edge_ptr);
 
+    // set gaussian convolution kernel
+    float *gaussian_ptr = (float *)clEnqueueMapBuffer(queue, gaussian_cl, CL_TRUE, CL_MAP_WRITE, 0, gaussian_kern_size * gaussian_kern_size, 0, NULL, NULL, &status);
+    checkError(status, "Failed to map gaussian kernel buffer to pointer");
+    // kernel values copied from 3x3 from wikipedia: https://en.wikipedia.org/wiki/Kernel_(image_processing)
+    *gaussian_ptr = { 1.0/16, 2.0/16, 1.0/16, 2.0/16, 4.0/16, 2.0/16, 1.0/16, 2.0/16, 1.0/16 };
+    clEnqueueUnmapMemObject(queue, gaussian_cl, gaussian_ptr, 0, NULL, NULL);
 
-    int max_frames = 299;
+    // set sobel x convolution kernel
+    float *sobel_x_ptr = (float *)clEnqueueMapBuffer(queue, sobel_x_cl, CL_TRUE, CL_MAP_WRITE, 0, sobel_kern_size * sobel_kern_size, 0, NULL, NULL, &status);
+    checkError(status, "Failed to map sobel_x kernel buffer to pointer");
+    // kernel values copied from 3x3 from wikipedia: https://en.wikipedia.org/wiki/Kernel_(image_processing)
+    *sobel_x_ptr = { 1.0/16, 2.0/16, 1.0/16, 2.0/16, 4.0/16, 2.0/16, 1.0/16, 2.0/16, 1.0/16 };
+    clEnqueueUnmapMemObject(queue, sobel_x_cl, sobel_x_ptr, 0, NULL, NULL);
+
+    // set sobel y convolution kernel
+    float *sobel_y_ptr = (float *)clEnqueueMapBuffer(queue, sobel_y_cl, CL_TRUE, CL_MAP_WRITE, 0, sobel_kern_size * sobel_kern_size, 0, NULL, NULL, &status);
+    checkError(status, "Failed to map sobel_x kernel buffer to pointer");
+    // kernel values copied from 3x3 from wikipedia: https://en.wikipedia.org/wiki/Kernel_(image_processing)
+    *sobel_y_ptr = { 1.0/16, 2.0/16, 1.0/16, 2.0/16, 4.0/16, 2.0/16, 1.0/16, 2.0/16, 1.0/16 };
+    clEnqueueUnmapMemObject(queue, sobel_y_cl, sobel_y_ptr, 0, NULL, NULL);
+
+
+    int max_frames = 100; // 299;
     while (true) {
         if (++count > max_frames) break;
 
@@ -177,25 +232,59 @@ int main(int argc, char** argv)
         cvtColor(cameraFrame, grayframe, CV_BGR2GRAY);
 
         // do video filter on CPU using OpenCV
-        start = chrono::high_resolution_clock::now();
+        auto start = chrono::high_resolution_clock::now();
+
+#if GPU_GAUSSIAN
+#else
+        if (grayframe_ptr == NULL)
+            grayframe_ptr = (unsigned char *)clEnqueueMapBuffer(queue, grayframe_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
 
         GaussianBlur(grayframe, grayframe, Size(3, 3), 0, 0);
         GaussianBlur(grayframe, grayframe, Size(3, 3), 0, 0);
         GaussianBlur(grayframe, grayframe, Size(3, 3), 0, 0);
+#endif  // GPU_GAUSSIAN
+
+
+#if GPU_SOBEL
+#else
+        // remap these buffers to use on cpu
+        if (edge_x_ptr == NULL)
+            edge_x_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_x_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
+
+        if (edge_y_ptr == NULL)
+            edge_y_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_y_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
 
         Scharr(grayframe, edge_x, CV_8U, 0, 1, 1, 0, BORDER_DEFAULT);
         Scharr(grayframe, edge_y, CV_8U, 1, 0, 1, 0, BORDER_DEFAULT);
+#endif  // GPU_SOBEL
 
-        addWeighted( edge_x, 0.5, edge_y, 0.5, 0, edge);  // average between edge_x and edge_y, stored in edge
 
+        auto avg_start = chrono::high_resolution_clock::now();
+#if GPU_AVERAGE
+        clEnqueueUnmapMemObject(queue, edge_x_cl, edge_x_ptr, 0, NULL, NULL);
+        clEnqueueUnmapMemObject(queue, edge_y_cl, edge_y_ptr, 0, NULL, NULL);
+        clEnqueueUnmapMemObject(queue, edge_cl, edge_ptr, 0, NULL, NULL);
+        edge_x_ptr = NULL; edge_y_ptr = NULL; edge_ptr = NULL;
 
-#define CPU_THRESHOLD
-        auto thresh_start = chrono::high_resolution_clock::now();
-#ifdef CPU_THRESHOLD
-        threshold(edge, edge, THRESH_VAL, THRESH_MAXVAL, THRESH_BINARY_INV);  // threshold over 80, all data either 0 or 255
+        cl_event avg_event;
+        status = clEnqueueNDRangeKernel(queue, average_kernel, 1, NULL, &frame_size_px, NULL, 0, NULL, &avg_event);
+        checkError(status, "Failed to launch average kernel");
+
+        status = clWaitForEvents(1, &avg_event);
+        checkError(status, "Failed to wait for average event");
+
 #else
+        addWeighted( edge_x, 0.5, edge_y, 0.5, 0, edge);  // average between edge_x and edge_y, stored in edge
+#endif  // GPU_AVERAGE
+        auto avg_end = chrono::high_resolution_clock::now();
+        auto avg_dur = chrono::duration_cast<chrono::microseconds>(avg_end - avg_start).count() / 1000.0f;
+
+
+        auto thresh_start = chrono::high_resolution_clock::now();
+#if GPU_THRESHOLD
         // launch threshold kernel
         clEnqueueUnmapMemObject(queue, edge_cl, edge_ptr, 0, NULL, NULL);
+        edge_ptr = NULL;
 
         cl_event threshold_event;
         status = clEnqueueNDRangeKernel(queue, threshold_kernel, 1, NULL, &frame_size_px, NULL, 0, NULL, &threshold_event);
@@ -203,25 +292,34 @@ int main(int argc, char** argv)
 
         status = clWaitForEvents(1, &threshold_event);
         checkError(status, "Failed to wait for threshold event");
+#else
+        if (edge_ptr == NULL)
+            edge_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
 
-        edge_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
-#endif  // CPU_THRESHOLD
+        threshold(edge, edge, THRESH_VAL, THRESH_MAXVAL, THRESH_BINARY_INV);  // threshold over 80, all data either 0 or 255
+#endif  // GPU_THRESHOLD
         auto thresh_end = chrono::high_resolution_clock::now();
-        cout << "thresholding: " << chrono::duration_cast<chrono::microseconds>(thresh_end - thresh_start).count() / 1000.0f << " ms" << endl;
+        auto thresh_dur = chrono::duration_cast<chrono::microseconds>(thresh_end - thresh_start).count() / 1000.0f;
 
-        end = chrono::high_resolution_clock::now();
+        auto end = chrono::high_resolution_clock::now();
+
+
+        if (edge_ptr == NULL)
+            edge_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
 
         Mat displayframe(size, CV_8U, grayframe_ptr);
         bitwise_and(displayframe, edge, displayframe);  // this also does masking
         outputVideo << displayframe;
 
-#ifdef SHOW
+#if SHOW
         imshow(window_name, displayframe);
         waitKey(1);
 #endif
         
-        diff = chrono::duration_cast<chrono::milliseconds>(end - start);
-        tot_ms += diff.count();
+        auto diff = chrono::duration_cast<chrono::microseconds>(end - start).count() / 1000.0f;
+        printf("avg: %.3f ms\tthresh: %.3f ms\tfull: %.3f ms\n", avg_dur, thresh_dur, diff);
+
+        tot_ms += diff;
     }
 
     outputVideo.release();
