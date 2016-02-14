@@ -320,7 +320,8 @@ int main(int argc, char** argv)
         edge_x_ptr = NULL; edge_y_ptr = NULL; edge_ptr = NULL;
 
         cl_event avg_event;
-        status = clEnqueueNDRangeKernel(queue, average_kernel, 1, NULL, &frame_size_px, NULL, 0, NULL, &avg_event);
+        const size_t avg_work_size = frame_size_px / 4;
+        status = clEnqueueNDRangeKernel(queue, average_kernel, 1, NULL, &avg_work_size, NULL, 0, NULL, &avg_event);
         checkError(status, "Failed to launch average kernel");
 
         status = clWaitForEvents(1, &avg_event);
@@ -340,7 +341,8 @@ int main(int argc, char** argv)
         edge_ptr = NULL;
 
         cl_event threshold_event;
-        status = clEnqueueNDRangeKernel(queue, threshold_kernel, 1, NULL, &frame_size_px, NULL, 0, NULL, &threshold_event);
+        const size_t thresh_work_size = frame_size_px / 16;
+        status = clEnqueueNDRangeKernel(queue, threshold_kernel, 1, NULL, &thresh_work_size, NULL, 0, NULL, &threshold_event);
         checkError(status, "Failed to launch threshold kernel");
 
         status = clWaitForEvents(1, &threshold_event);
