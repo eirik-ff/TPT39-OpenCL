@@ -14,8 +14,8 @@ using namespace std;
 #define STRING_BUFFER_LEN 1024
 
 #define SHOW 1
-#define GPU_GAUSSIAN 0
-#define GPU_SOBEL 0
+#define GPU_GAUSSIAN 1
+#define GPU_SOBEL 1
 #define GPU_AVERAGE 1
 #define GPU_THRESHOLD 1
 
@@ -25,7 +25,6 @@ using namespace std;
 OpenCV Mat object is stored in row-major order, see https://docs.opencv.org/2.4/modules/core/doc/basic_structures.html#mat
 
 */
-
 
 int main(int argc, char** argv)
 {
@@ -162,6 +161,13 @@ int main(int argc, char** argv)
     checkError(status, "Failed to allocal sobel y kernel buffer");
 
 
+    // set static convolution kernel args
+    status = clSetKernelArg(convolve_kernel, 2, sizeof(int), &size.width);
+    checkError(status, "Failed to set convolve kernel width arg");
+    status = clSetKernelArg(convolve_kernel, 3, sizeof(int), &size.height);
+    checkError(status, "Failed to set convolve kernel width arg");
+
+
     // set threshold kernel args
     status = clSetKernelArg(threshold_kernel, 0, sizeof(cl_mem), &edge_cl);
     checkError(status, "Failed to set img param in threshold kernel");
@@ -202,25 +208,19 @@ int main(int argc, char** argv)
     Mat edge(size, CV_8U, edge_ptr);
 
     // set gaussian convolution kernel
-    float *gaussian_ptr = (float *)clEnqueueMapBuffer(queue, gaussian_cl, CL_TRUE, CL_MAP_WRITE, 0, gaussian_kern_size * gaussian_kern_size, 0, NULL, NULL, &status);
-    checkError(status, "Failed to map gaussian kernel buffer to pointer");
-    // kernel values copied from 3x3 from wikipedia: https://en.wikipedia.org/wiki/Kernel_(image_processing)
-    *gaussian_ptr = { 1.0/16, 2.0/16, 1.0/16, 2.0/16, 4.0/16, 2.0/16, 1.0/16, 2.0/16, 1.0/16 };
-    clEnqueueUnmapMemObject(queue, gaussian_cl, gaussian_ptr, 0, NULL, NULL);
+    float gaussian_kern[] = { 1.0/16, 2.0/16, 1.0/16, 2.0/16, 4.0/16, 2.0/16, 1.0/16, 2.0/16, 1.0/16 };
+    status = clEnqueueWriteBuffer(queue, gaussian_cl, CL_TRUE, 0, gaussian_kern_size * gaussian_kern_size * sizeof(float), gaussian_kern, 0, NULL, NULL);
+    checkError(status, "Failed to write gaussian kernel to buffer");
 
     // set sobel x convolution kernel
-    float *sobel_x_ptr = (float *)clEnqueueMapBuffer(queue, sobel_x_cl, CL_TRUE, CL_MAP_WRITE, 0, sobel_kern_size * sobel_kern_size, 0, NULL, NULL, &status);
-    checkError(status, "Failed to map sobel_x kernel buffer to pointer");
-    // kernel values copied from 3x3 from wikipedia: https://en.wikipedia.org/wiki/Kernel_(image_processing)
-    *sobel_x_ptr = { 1.0/16, 2.0/16, 1.0/16, 2.0/16, 4.0/16, 2.0/16, 1.0/16, 2.0/16, 1.0/16 };
-    clEnqueueUnmapMemObject(queue, sobel_x_cl, sobel_x_ptr, 0, NULL, NULL);
+    float sobel_x_kern[] = {-3.0, 0.0, 3.0, -10.0, 0.0, 10.0, -3.0, 0.0, 3.0};
+    status = clEnqueueWriteBuffer(queue, sobel_x_cl, CL_TRUE, 0, sobel_kern_size * sobel_kern_size * sizeof(float), sobel_x_kern, 0, NULL, NULL);
+    checkError(status, "Failed to write sobel x kernel to buffer");
 
     // set sobel y convolution kernel
-    float *sobel_y_ptr = (float *)clEnqueueMapBuffer(queue, sobel_y_cl, CL_TRUE, CL_MAP_WRITE, 0, sobel_kern_size * sobel_kern_size, 0, NULL, NULL, &status);
-    checkError(status, "Failed to map sobel_x kernel buffer to pointer");
-    // kernel values copied from 3x3 from wikipedia: https://en.wikipedia.org/wiki/Kernel_(image_processing)
-    *sobel_y_ptr = { 1.0/16, 2.0/16, 1.0/16, 2.0/16, 4.0/16, 2.0/16, 1.0/16, 2.0/16, 1.0/16 };
-    clEnqueueUnmapMemObject(queue, sobel_y_cl, sobel_y_ptr, 0, NULL, NULL);
+    float sobel_y_kern[] = {-3.0, -10.0, -3.0, 0.0, 0.0, 0.0, 3.0, 10.0, 3.0};
+    status = clEnqueueWriteBuffer(queue, sobel_y_cl, CL_TRUE, 0, sobel_kern_size * sobel_kern_size * sizeof(float), sobel_y_kern, 0, NULL, NULL);
+    checkError(status, "Failed to write sobel y kernel to buffer");
 
 
     int max_frames = 100; // 299;
@@ -231,10 +231,34 @@ int main(int argc, char** argv)
         camera >> cameraFrame;
         cvtColor(cameraFrame, grayframe, CV_BGR2GRAY);
 
+        status = clEnqueueUnmapMemObject(queue, grayframe_cl, grayframe_ptr, 0, NULL, NULL);
+        checkError(status, "Failed to unmap grayframe ptr");
+        grayframe_ptr = NULL;
+
         // do video filter on CPU using OpenCV
         auto start = chrono::high_resolution_clock::now();
 
+        auto gauss_start = chrono::high_resolution_clock::now();
 #if GPU_GAUSSIAN
+        status = clSetKernelArg(convolve_kernel, 0, sizeof(cl_mem), &grayframe_cl);
+        checkError(status, "Failed to set convolve kernel input img arg");
+        status = clSetKernelArg(convolve_kernel, 1, sizeof(cl_mem), &grayframe_cl);
+        checkError(status, "Failed to set convolve kernel output img arg");
+        status = clSetKernelArg(convolve_kernel, 4, sizeof(cl_mem), &gaussian_cl);
+        checkError(status, "Failed to set convolve kernel gaussian arg");
+        status = clSetKernelArg(convolve_kernel, 5, sizeof(int), &gaussian_kern_size);
+        checkError(status, "Failed to set convolve kernel gaussian kern size arg");
+
+        // we're supposed to do the gaussian filter three times
+        for (int i = 0; i < 3; i++) {
+            cl_event gauss_event;
+            status = clEnqueueNDRangeKernel(queue, convolve_kernel, 1, NULL, &frame_size_bytes, NULL, 0, NULL, &gauss_event);
+            checkError(status, "Failed to launch gaussian kernel");
+
+            status = clWaitForEvents(1, &gauss_event);
+            checkError(status, "Failed to wait for gaussian event");
+        }
+
 #else
         if (grayframe_ptr == NULL)
             grayframe_ptr = (unsigned char *)clEnqueueMapBuffer(queue, grayframe_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
@@ -243,9 +267,42 @@ int main(int argc, char** argv)
         GaussianBlur(grayframe, grayframe, Size(3, 3), 0, 0);
         GaussianBlur(grayframe, grayframe, Size(3, 3), 0, 0);
 #endif  // GPU_GAUSSIAN
+        auto gauss_end = chrono::high_resolution_clock::now();
+        auto gauss_dur = chrono::duration_cast<chrono::microseconds>(gauss_end - gauss_start).count() / 1000.0f;
 
 
+        auto sobel_start = chrono::high_resolution_clock::now();
 #if GPU_SOBEL
+        status = clSetKernelArg(convolve_kernel, 0, sizeof(cl_mem), &grayframe_cl);
+        checkError(status, "Failed to set convolve kernel input img arg");
+        status = clSetKernelArg(convolve_kernel, 5, sizeof(int), &sobel_kern_size);
+        checkError(status, "Failed to set convolve kernel sobel kern size arg");
+
+        // sobel x
+        status = clSetKernelArg(convolve_kernel, 1, sizeof(cl_mem), &edge_x_cl);
+        checkError(status, "Failed to set convolve kernel sobel x output img arg");
+        status = clSetKernelArg(convolve_kernel, 4, sizeof(cl_mem), &sobel_x_cl);
+        checkError(status, "Failed to set convolve kernel sobel x kernel buffer arg");
+
+        cl_event sobel_x_event;
+        status = clEnqueueNDRangeKernel(queue, convolve_kernel, 1, NULL, &frame_size_bytes, NULL, 0, NULL, &sobel_x_event);
+        checkError(status, "Failed to launch sobel x kernel");
+
+        status = clWaitForEvents(1, &sobel_x_event);
+        checkError(status, "Failed to wait for sobel x event");
+
+        // sobel y
+        status = clSetKernelArg(convolve_kernel, 1, sizeof(cl_mem), &edge_y_cl);
+        checkError(status, "Failed to set convolve kernel sobel y output img arg");
+        status = clSetKernelArg(convolve_kernel, 4, sizeof(cl_mem), &sobel_y_cl);
+        checkError(status, "Failed to set convolve kernel sobel y kernel buffer arg");
+
+        cl_event sobel_y_event;
+        status = clEnqueueNDRangeKernel(queue, convolve_kernel, 1, NULL, &frame_size_bytes, NULL, 0, NULL, &sobel_y_event);
+        checkError(status, "Failed to launch sobel y kernel");
+
+        status = clWaitForEvents(1, &sobel_y_event);
+        checkError(status, "Failed to wait for sobel y event");
 #else
         // remap these buffers to use on cpu
         if (edge_x_ptr == NULL)
@@ -257,6 +314,8 @@ int main(int argc, char** argv)
         Scharr(grayframe, edge_x, CV_8U, 0, 1, 1, 0, BORDER_DEFAULT);
         Scharr(grayframe, edge_y, CV_8U, 1, 0, 1, 0, BORDER_DEFAULT);
 #endif  // GPU_SOBEL
+        auto sobel_end = chrono::high_resolution_clock::now();
+        auto sobel_dur = chrono::duration_cast<chrono::microseconds>(sobel_end - sobel_start).count() / 1000.0f;
 
 
         auto avg_start = chrono::high_resolution_clock::now();
@@ -306,6 +365,11 @@ int main(int argc, char** argv)
 
         if (edge_ptr == NULL)
             edge_ptr = (unsigned char *)clEnqueueMapBuffer(queue, edge_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
+        if (grayframe_ptr == NULL) {
+            grayframe_ptr = (unsigned char *)clEnqueueMapBuffer(queue, grayframe_cl, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, frame_size_bytes, 0, NULL, NULL, &status);
+            checkError(status, "Failed to map grayframe buffer to pointer before displaying");
+        }
+
 
         Mat displayframe(size, CV_8U, grayframe_ptr);
         bitwise_and(displayframe, edge, displayframe);  // this also does masking
@@ -317,7 +381,7 @@ int main(int argc, char** argv)
 #endif
         
         auto diff = chrono::duration_cast<chrono::microseconds>(end - start).count() / 1000.0f;
-        printf("avg: %.3f ms\tthresh: %.3f ms\tfull: %.3f ms\n", avg_dur, thresh_dur, diff);
+        printf("gauss: %.3f ms  sobel: %.3f ms  avg: %.3f ms  thresh: %.3f ms  full: %.3f ms\n", gauss_dur, sobel_dur, avg_dur, thresh_dur, diff);
 
         tot_ms += diff;
     }
