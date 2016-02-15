@@ -174,9 +174,6 @@ int main()
     for(unsigned long j = 0; j < N; ++j) {
         input_a[j] = rand_float();
         input_b[j] = rand_float();
-        //printf("ref %f\n",ref_output[j]);
-        //input_a[j] = j;
-        //input_b[j] = j;
     }
     auto end = chrono::high_resolution_clock::now();
     auto diff = chrono::duration_cast<chrono::microseconds>(end - start);
@@ -225,7 +222,6 @@ int main()
     status = clSetKernelArg(kernel, argi++, sizeof(cl_mem), &output_buf);
     checkError(status, "Failed to set argument 3");
 
-    const size_t global_work_size = N;
     start = chrono::high_resolution_clock::now();
 
 #if USE_MAP_BUFFER
@@ -236,6 +232,7 @@ int main()
     clEnqueueUnmapMemObject(queue, input_b_buf, input_b, 0, NULL, NULL);
 #endif // USE_MAP_BUFFER
 
+    const size_t global_work_size = N / 4;
     status = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global_work_size, NULL, 2, write_event, &kernel_event);
     checkError(status, "Failed to launch kernel");
 
