@@ -1,5 +1,5 @@
-__kernel void average(__global uchar4 *in1, 
-                      __global uchar4 *in2,
+__kernel void average(__global const uchar4 *in1, 
+                      __global const uchar4 *in2,
                       __global uchar4 *out)
 {
     int gid = get_global_id(0);
