@@ -1,10 +1,12 @@
+// 1D kernel
 __kernel void matrix_mul(__global const float *A, 
-                        __global const float *B, 
-                        __global float *restrict C,
-                        const int N)
+                         __global const float *B, 
+                         __global float *restrict C,
+                         const int N)
 {
-    int i = get_global_id(0);
-    int j = get_global_id(1);
+    int gid = get_global_id(0);
+    int i = gid / N;
+    int j = gid % N;
 
     int idxC = i * N + j;
     C[idxC] = 0;
